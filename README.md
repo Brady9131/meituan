@@ -12,14 +12,18 @@
 # 推荐：先激活虚拟环境，然后用 streamlit 启动（不要用 `python app.py`）
 source .venv/bin/activate
 
-# 在本机启动
-streamlit run app.py
+# 在本机启动（稳定版：不依赖 numpy/pandas，避免该环境 segfault）
+# 默认端口可直接跑，也可以手动指定，例如 8504
+./run_dashboard.sh 8504
 
 # 如果你想更稳（固定缓存目录/禁止 telemetry），也可以用脚本
 ./run_dashboard.sh
 
 # 该脚本会启动一个不依赖 numpy/pandas 的版本（避免该环境下的 segfault）
 ```
+
+## 关于“GitHub Pages 为什么不是我们那个交互网站”
+你截图的 `github.io/...` 页面通常只是 GitHub Pages 渲染的 `README` 静态内容，**不能直接运行 Streamlit 交互 UI**。真正的网页交互仍需要你在本机运行 `./run_dashboard.sh ...`，然后打开终端里给出的 `http://127.0.0.1:PORT`。
 
 ## 数据格式（推荐）
 
