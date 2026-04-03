@@ -1,0 +1,12 @@
+.venv/
+.streamlit/
+.streamlit_cache/
+__pycache__/
+*.pyc
+cleaned_data/
+*.parquet
+*.png
+*.jpg
+*.jpeg
+.env
+secrets.toml
