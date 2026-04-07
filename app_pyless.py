@@ -277,6 +277,48 @@ def _deepseek_chat(*, api_key: str, model: str, base_url: str, content: str) -> 
     except Exception:
         return str(data)
 
+
+def _roi_sweep_dict(
+    metrics: MetricsTable,
+    segments: list[str],
+    *,
+    sweep_max_pct: int,
+    addict_accept_cost_share: float,
+    ite_blocking_mode_label: str,
+) -> dict[str, Any]:
+    pcts = list(range(0, int(sweep_max_pct) + 1, 2))
+    rois: list[float] = []
+    gmvs: list[float] = []
+    treated: list[float] = []
+    budgets: list[float] = []
+    utils: list[float] = []
+    mode = "block_negative" if ite_blocking_mode_label.startswith("拦截") else "allow_negative"
+    for pct in pcts:
+        rr = optimize_budget(
+            metrics,
+            segments,
+            budget_reduction_pct=float(pct),
+            addict_accept_cost_share=float(addict_accept_cost_share),
+            ite_blocking_mode=mode,
+        )
+        rois.append(rr.roi)
+        gmvs.append(rr.incremental_gmv)
+        treated.append(rr.treated_cost)
+        budgets.append(rr.budget)
+        bu = rr.treated_cost / rr.budget if rr.budget > 1e-12 else 0.0
+        utils.append(min(1.0, bu))
+    return {
+        "pcts": pcts,
+        "rois": rois,
+        "gmvs": gmvs,
+        "treated": treated,
+        "budgets": budgets,
+        "utils": utils,
+        "sweep_max_applied": int(sweep_max_pct),
+        "fp": (float(addict_accept_cost_share), ite_blocking_mode_label),
+    }
+
+
 if metrics is None:
     st.info("请先选择数据来源。上传你的 `ite/pae/cost` 指标 CSV 后即可开始交互。")
     st.stop()
@@ -335,12 +377,18 @@ with tab_interactive:
         unsafe_allow_html=True,
     )
 
+    st.markdown("---")
+    st.markdown("## 最小替换清单")
+    st.markdown(
+        """
+        1. 用你的 GRF 输出生成 `user_id, ite, pae, cost`（CSV）。
+        2. 上传到侧边栏。
+        3. 调整预算缩减、PAE 阈值分位数与 Addict 退坡强度，看象限与 ROI 的变化。
+        """
+    )
+
 with tab_budget:
     st.markdown("## 预算重组与增量 ROI")
-    st.caption(
-        "说明：在「总预算缩减」约束下，按 **Gold 优先 → Addict 追加** 做分数背包式投放；"
-        "Organic/Sinking 默认不投放。下方可查看 **随预算缩减变化的 ROI / 增量 GMV 曲线**。"
-    )
 
     if "opt_result" not in st.session_state:
         st.session_state["opt_result"] = None
@@ -373,39 +421,27 @@ with tab_budget:
 
         st.markdown(f"### 增量 GMV（来自 ITE 的加权求和）: `{_num_fmt(result.incremental_gmv)}`")
 
-        st.markdown("#### 敏感度曲线：预算缩减 ↔ ROI / 增量 GMV")
-        st.caption(
-            "在**当前**侧栏参数（负增量处理、Addict 退坡强度等）不变时，仅改变「总预算缩减」百分比，扫描 0%～30% 的优化结果。"
-        )
-        if "roi_sweep" not in st.session_state:
-            st.session_state["roi_sweep"] = None
-
-        if st.button("生成变化曲线（0%～30%，步长 2%）", key="btn_roi_sweep"):
-            pcts: list[int] = list(range(0, 31, 2))
-            rois: list[float] = []
-            gmvs: list[float] = []
-            treated: list[float] = []
-            mode = "block_negative" if ite_blocking_mode.startswith("拦截") else "allow_negative"
-            with st.spinner("正在扫描多个预算场景…"):
-                for pct in pcts:
-                    rr = optimize_budget(
-                        metrics,
-                        segments,
-                        budget_reduction_pct=float(pct),
-                        addict_accept_cost_share=float(addict_accept_cost_share),
-                        ite_blocking_mode=mode,
-                    )
-                    rois.append(rr.roi)
-                    gmvs.append(rr.incremental_gmv)
-                    treated.append(rr.treated_cost)
-            st.session_state["roi_sweep"] = {
-                "pcts": pcts,
-                "rois": rois,
-                "gmvs": gmvs,
-                "treated": treated,
-            }
-
+        _sweep_max = st.selectbox("扫描最大预算缩减（%）", [30, 50, 70, 90], index=1, key="roi_sweep_max_pct")
+        _max_i = int(_sweep_max)
+        _sweep_fp = (float(addict_accept_cost_share), ite_blocking_mode)
         sweep = st.session_state.get("roi_sweep")
+        sweep_stale = (
+            sweep is None
+            or "budgets" not in sweep
+            or sweep.get("sweep_max_applied") != _max_i
+            or sweep.get("fp") != _sweep_fp
+        )
+        if sweep_stale:
+            with st.spinner("正在生成敏感度曲线…"):
+                st.session_state["roi_sweep"] = _roi_sweep_dict(
+                    metrics,
+                    segments,
+                    sweep_max_pct=_max_i,
+                    addict_accept_cost_share=float(addict_accept_cost_share),
+                    ite_blocking_mode_label=ite_blocking_mode,
+                )
+            sweep = st.session_state["roi_sweep"]
+
         if sweep:
             fig_curve = make_subplots(specs=[[{"secondary_y": True}]])
             fig_curve.add_trace(
@@ -435,36 +471,73 @@ with tab_budget:
                 height=440,
                 hovermode="x unified",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                margin=dict(l=10, r=10, t=40, b=10),
-                title=dict(text="随「总预算缩减」变化的 ROI 与增量 GMV", font=dict(size=15)),
+                margin=dict(l=10, r=10, t=28, b=10),
             )
             fig_curve.update_xaxes(title_text="总预算缩减（%）", dtick=5)
             fig_curve.update_yaxes(title_text="增量 ROI", secondary_y=False, gridcolor="rgba(255,255,255,0.08)")
             fig_curve.update_yaxes(title_text="增量 GMV（ITE×投放强度）", secondary_y=True, gridcolor="rgba(255,255,255,0.08)")
             st.plotly_chart(fig_curve, use_container_width=True)
 
-            fig_t = go.Figure(
+            fig_budget_cmp = go.Figure()
+            fig_budget_cmp.add_trace(
+                go.Scatter(
+                    x=sweep["pcts"],
+                    y=sweep["budgets"],
+                    name="可用预算上限",
+                    mode="lines+markers",
+                    line=dict(color="#9aa4b2", width=2, dash="dash"),
+                    marker=dict(size=5),
+                )
+            )
+            fig_budget_cmp.add_trace(
+                go.Scatter(
+                    x=sweep["pcts"],
+                    y=sweep["treated"],
+                    name="实际投放成本",
+                    mode="lines+markers",
+                    fill="tonexty",
+                    fillcolor="rgba(255,176,32,0.15)",
+                    line=dict(color="#ffb020", width=3),
+                    marker=dict(size=6),
+                )
+            )
+            fig_budget_cmp.update_layout(
+                template="plotly_dark",
+                height=360,
+                xaxis_title="总预算缩减（%）",
+                yaxis_title="金额",
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="center", x=0.5),
+                margin=dict(l=10, r=10, t=28, b=10),
+            )
+            st.plotly_chart(fig_budget_cmp, use_container_width=True)
+
+            fig_util = go.Figure(
                 data=[
                     go.Scatter(
                         x=sweep["pcts"],
-                        y=sweep["treated"],
-                        name="已使用投放成本",
+                        y=sweep["utils"],
+                        name="预算利用率（实际消耗/可用预算）",
+                        mode="lines+markers",
                         fill="tozeroy",
-                        line=dict(color="#ffb020"),
+                        line=dict(color="#7db2ff", width=2),
+                        marker=dict(size=5),
                     )
                 ]
             )
-            fig_t.update_layout(
+            fig_util.update_layout(
                 template="plotly_dark",
                 height=300,
-                title=dict(text="随预算缩减：实际投放消耗的变化", font=dict(size=14)),
                 xaxis_title="总预算缩减（%）",
-                yaxis_title="投放成本",
-                margin=dict(l=10, r=10, t=50, b=10),
+                yaxis_title="利用率",
+                yaxis_tickformat=".0%",
+                yaxis_range=[
+                    0,
+                    max(0.1, min(1.05, (max(sweep["utils"]) if sweep["utils"] else 0) * 1.15 + 0.03)),
+                ],
+                margin=dict(l=10, r=10, t=28, b=10),
             )
-            st.plotly_chart(fig_t, use_container_width=True)
-        else:
-            st.info("点击 **「生成变化曲线」** 后，将绘制 ROI / 增量 GMV / 投放成本随预算缩减的变化。")
+            st.plotly_chart(fig_util, use_container_width=True)
 
         st.markdown("#### 当前结果：各象限成本与增量占比")
         cbar1, cbar2 = st.columns(2)
@@ -528,6 +601,8 @@ with tab_llm:
     st.markdown("## 沙盘反馈（LLM）")
     st.caption("与「交互实验」「受限预算优化结果」并列；需先在 **受限预算优化结果** 中执行一次预算优化。")
 
+    use_deepseek = st.toggle("启用 LLM 生成反馈", value=False)
+
     st.text_input("API Key", placeholder="与所选服务商一致", key="deepseek_api_key_sidebar")
 
     _provider_labels = [p[0] for p in LLM_PROVIDER_PRESETS]
@@ -555,8 +630,6 @@ with tab_llm:
         else:
             deepseek_model = _model_pick
 
-    use_deepseek = st.toggle("启用 LLM 生成反馈", value=False)
-
     st.subheader("沙盘金额口径")
     deepseek_amount_mode = st.radio(
         "补贴/优惠券金额用于沙盘的来源",
@@ -564,7 +637,17 @@ with tab_llm:
         index=0,
         horizontal=True,
     )
-    deepseek_fixed_amount = st.number_input("手动固定补贴金额（RMB）", value=5.0, step=0.5, format="%.1f")
+    if deepseek_amount_mode == "手动指定固定金额":
+        deepseek_fixed_amount = st.number_input(
+            "手动固定补贴金额（RMB）",
+            value=5.0,
+            step=0.5,
+            format="%.1f",
+            key="deepseek_fixed_amount_llm",
+        )
+    else:
+        st.caption("选择「使用优化估算」时，沙盘金额以预算优化结果为准，无需填写固定金额。")
+        deepseek_fixed_amount = float(st.session_state.get("deepseek_fixed_amount_llm", 5.0))
 
     st.markdown("---")
     st.markdown("### 两段式沙盘输出（按象限）")
@@ -681,14 +764,3 @@ with tab_llm:
                 else:
                     st.markdown(fallback)
                     st.caption(f"示例候选：{ids}")
-
-st.markdown("---")
-st.markdown("## 最小替换清单")
-st.markdown(
-    """
-    1. 用你的 GRF 输出生成 `user_id, ite, pae, cost`（CSV）。
-    2. 上传到侧边栏。
-    3. 调整预算缩减、PAE 阈值分位数与 Addict 退坡强度，看象限与 ROI 的变化。
-    """
-)
-
