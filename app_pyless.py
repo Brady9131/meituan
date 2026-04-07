@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 
@@ -66,10 +67,6 @@ AGENT_FEEDBACK = {
     "Organic": "没券也会买；不发更干净。",
     "Sinking": "发券反而更亏；拦截并停用。",
 }
-
-
-# 报告配图：放在仓库 `assets/` 下，便于本机与 Streamlit Cloud 同路径加载（勿再用本机绝对路径）
-ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 
 def _num_fmt(x: float) -> str:
@@ -198,6 +195,16 @@ addict_accept_cost_share = st.sidebar.slider(
 # --- DeepSeek Multi-Agent（可选） ---
 st.sidebar.divider()
 st.sidebar.subheader("沙盘反馈生成（DeepSeek，可选）")
+st.sidebar.caption(
+    "密钥：Cloud **Secrets** 里的 `DEEPSEEK_API_KEY` · 或在本页**第一个框**粘贴（仅本会话）。"
+)
+# 放在本块最上方，避免侧栏过长时要向下滚才看到；不用 password 类型，避免少数环境/主题下输入框不可见
+st.sidebar.text_input(
+    "DeepSeek API Key（可选，仅本会话）",
+    placeholder="sk-… 粘贴后按回车或点空白处生效",
+    help="不会写入 Git；公网部署更推荐在 Streamlit Cloud → App settings → Secrets 配置 DEEPSEEK_API_KEY。",
+    key="deepseek_api_key_sidebar",
+)
 use_deepseek = st.sidebar.toggle("启用 DeepSeek 生成反馈", value=False)
 deepseek_model = st.sidebar.text_input("模型名", value="deepseek-chat")
 deepseek_base_url = st.sidebar.text_input("API Base URL", value="https://api.deepseek.com")
@@ -211,15 +218,35 @@ deepseek_amount_mode = st.sidebar.radio(
 deepseek_fixed_amount = st.sidebar.number_input("手动固定补贴金额（RMB）", value=5.0, step=0.5, format="%.1f")
 
 
+def _secrets_toml_exists() -> bool:
+    here = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
+    home = Path.home() / ".streamlit" / "secrets.toml"
+    return here.is_file() or home.is_file()
+
+
+def _likely_streamlit_community_cloud() -> bool:
+    # 云端运行时常见特征（无本地 secrets 文件时仍可向 st.secrets 注入配置）
+    return os.environ.get("USER") == "appuser"
+
+
 def _deepseek_api_key() -> str:
     env = str(os.environ.get("DEEPSEEK_API_KEY", "") or "").strip()
     if env:
         return env
-    # Streamlit Community Cloud：在应用设置里配置的 Secrets 会出现在 st.secrets
-    try:
-        return str(st.secrets.get("DEEPSEEK_API_KEY", "") or "").strip()
-    except Exception:
-        return ""
+    # 本页顶栏输入优先（云端侧栏有时未滚动或未部署到最新版）
+    main = str(st.session_state.get("deepseek_api_key_main") or "").strip()
+    if main:
+        return main
+    side = str(st.session_state.get("deepseek_api_key_sidebar") or "").strip()
+    if side:
+        return side
+    # 仅当确实存在 secrets 配置时才读 st.secrets；否则 Streamlit 会在页面打出红色 “No secrets files found”
+    if _secrets_toml_exists() or _likely_streamlit_community_cloud():
+        try:
+            return str(st.secrets.get("DEEPSEEK_API_KEY", "") or "").strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def _deepseek_chat(*, api_key: str, model: str, base_url: str, content: str) -> str:
@@ -269,9 +296,13 @@ for s in segments:
 
 pae_high_rate = sum(1 for s in segments if s in ("Addict", "Sinking")) / max(1, len(segments))
 
-tab_interactive, tab_budget, tab_report = st.tabs(["交互实验", "受限预算优化结果", "报告视图（与论文对齐）"])
+tab_interactive, tab_budget = st.tabs(["交互实验", "受限预算优化结果"])
 
 with tab_interactive:
+    if use_deepseek:
+        st.caption(
+            "DeepSeek 两段式沙盘在 **「受限预算优化结果」** 标签页：请先点击 **「执行预算优化」**，再滚动到沙盘段落。"
+        )
     st.markdown("## ITE/PAE 象限散点（策略可视化）")
     st.plotly_chart(_scatter_fig(metrics, segments), use_container_width=True)
 
@@ -311,6 +342,17 @@ with tab_interactive:
 
 with tab_budget:
     st.markdown("## 预算重组与增量 ROI")
+    st.caption(
+        "说明：在「总预算缩减」约束下，按 **Gold 优先 → Addict 追加** 做分数背包式投放；"
+        "Organic/Sinking 默认不投放。下方可查看 **随预算缩减变化的 ROI / 增量 GMV 曲线**。"
+    )
+
+    st.text_input(
+        "DeepSeek API Key（本页填写；与侧栏密钥框二选一，仅本会话）",
+        placeholder="sk-… 未填则用环境变量或 Cloud Secrets",
+        key="deepseek_api_key_main",
+    )
+
     if "opt_result" not in st.session_state:
         st.session_state["opt_result"] = None
 
@@ -324,6 +366,7 @@ with tab_budget:
                 addict_accept_cost_share=float(addict_accept_cost_share),
                 ite_blocking_mode="block_negative" if ite_blocking_mode.startswith("拦截") else "allow_negative",
             )
+            st.session_state["roi_sweep"] = None  # 参数已变，旧的敏感度曲线作废
 
     result: OptimizationResult | None = st.session_state.get("opt_result")
     if result is None:
@@ -341,25 +384,128 @@ with tab_budget:
 
         st.markdown(f"### 增量 GMV（来自 ITE 的加权求和）: `{_num_fmt(result.incremental_gmv)}`")
 
-        # Cost share bar chart
+        st.markdown("#### 敏感度曲线：预算缩减 ↔ ROI / 增量 GMV")
+        st.caption(
+            "在**当前**侧栏参数（负增量处理、Addict 退坡强度等）不变时，仅改变「总预算缩减」百分比，扫描 0%～30% 的优化结果。"
+        )
+        if "roi_sweep" not in st.session_state:
+            st.session_state["roi_sweep"] = None
+
+        if st.button("生成变化曲线（0%～30%，步长 2%）", key="btn_roi_sweep"):
+            pcts: list[int] = list(range(0, 31, 2))
+            rois: list[float] = []
+            gmvs: list[float] = []
+            treated: list[float] = []
+            mode = "block_negative" if ite_blocking_mode.startswith("拦截") else "allow_negative"
+            with st.spinner("正在扫描多个预算场景…"):
+                for pct in pcts:
+                    rr = optimize_budget(
+                        metrics,
+                        segments,
+                        budget_reduction_pct=float(pct),
+                        addict_accept_cost_share=float(addict_accept_cost_share),
+                        ite_blocking_mode=mode,
+                    )
+                    rois.append(rr.roi)
+                    gmvs.append(rr.incremental_gmv)
+                    treated.append(rr.treated_cost)
+            st.session_state["roi_sweep"] = {
+                "pcts": pcts,
+                "rois": rois,
+                "gmvs": gmvs,
+                "treated": treated,
+            }
+
+        sweep = st.session_state.get("roi_sweep")
+        if sweep:
+            fig_curve = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_curve.add_trace(
+                go.Scatter(
+                    x=sweep["pcts"],
+                    y=sweep["rois"],
+                    name="增量 ROI",
+                    mode="lines+markers",
+                    line=dict(color="#7db2ff", width=3),
+                    marker=dict(size=6),
+                ),
+                secondary_y=False,
+            )
+            fig_curve.add_trace(
+                go.Scatter(
+                    x=sweep["pcts"],
+                    y=sweep["gmvs"],
+                    name="增量 GMV",
+                    mode="lines+markers",
+                    line=dict(color="#35d07f", width=2),
+                    marker=dict(size=5),
+                ),
+                secondary_y=True,
+            )
+            fig_curve.update_layout(
+                template="plotly_dark",
+                height=440,
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=10, r=10, t=40, b=10),
+                title=dict(text="随「总预算缩减」变化的 ROI 与增量 GMV", font=dict(size=15)),
+            )
+            fig_curve.update_xaxes(title_text="总预算缩减（%）", dtick=5)
+            fig_curve.update_yaxes(title_text="增量 ROI", secondary_y=False, gridcolor="rgba(255,255,255,0.08)")
+            fig_curve.update_yaxes(title_text="增量 GMV（ITE×投放强度）", secondary_y=True, gridcolor="rgba(255,255,255,0.08)")
+            st.plotly_chart(fig_curve, use_container_width=True)
+
+            fig_t = go.Figure(
+                data=[
+                    go.Scatter(
+                        x=sweep["pcts"],
+                        y=sweep["treated"],
+                        name="已使用投放成本",
+                        fill="tozeroy",
+                        line=dict(color="#ffb020"),
+                    )
+                ]
+            )
+            fig_t.update_layout(
+                template="plotly_dark",
+                height=300,
+                title=dict(text="随预算缩减：实际投放消耗的变化", font=dict(size=14)),
+                xaxis_title="总预算缩减（%）",
+                yaxis_title="投放成本",
+                margin=dict(l=10, r=10, t=50, b=10),
+            )
+            st.plotly_chart(fig_t, use_container_width=True)
+        else:
+            st.info("点击 **「生成变化曲线」** 后，将绘制 ROI / 增量 GMV / 投放成本随预算缩减的变化。")
+
+        st.markdown("#### 当前结果：各象限成本与增量占比")
+        cbar1, cbar2 = st.columns(2)
         cost_segments = sorted(
             result.segment_cost_share.keys(),
             key=lambda k: result.segment_cost_share[k],
             reverse=True,
         )
         cost_vals = [result.segment_cost_share[s] for s in cost_segments]
-        fig_cost = go.Figure(
-            data=[
-                go.Bar(
-                    x=cost_segments,
-                    y=cost_vals,
-                    marker_color=[SEG_COLORS.get(s, "#9aa4b2") for s in cost_segments],
-                    showlegend=False,
-                )
-            ]
-        )
-        fig_cost.update_layout(template="plotly_dark", margin=dict(l=10, r=10, t=20, b=10), height=320)
-        st.plotly_chart(fig_cost, use_container_width=True)
+        with cbar1:
+            fig_cost = go.Figure(
+                data=[
+                    go.Bar(
+                        x=cost_segments,
+                        y=cost_vals,
+                        marker_color=[SEG_COLORS.get(s, "#9aa4b2") for s in cost_segments],
+                        showlegend=False,
+                        text=[f"{v*100:.1f}%" for v in cost_vals],
+                        textposition="outside",
+                    )
+                ]
+            )
+            fig_cost.update_layout(
+                template="plotly_dark",
+                title="投放成本占比（按象限）",
+                yaxis_tickformat=".0%",
+                margin=dict(l=10, r=10, t=50, b=10),
+                height=340,
+            )
+            st.plotly_chart(fig_cost, use_container_width=True)
 
         inc_segments = sorted(
             result.segment_increment_share.keys(),
@@ -367,18 +513,27 @@ with tab_budget:
             reverse=True,
         )
         inc_vals = [result.segment_increment_share[s] for s in inc_segments]
-        fig_inc = go.Figure(
-            data=[
-                go.Bar(
-                    x=inc_segments,
-                    y=inc_vals,
-                    marker_color=[SEG_COLORS.get(s, "#9aa4b2") for s in inc_segments],
-                    showlegend=False,
-                )
-            ]
-        )
-        fig_inc.update_layout(template="plotly_dark", margin=dict(l=10, r=10, t=20, b=10), height=320)
-        st.plotly_chart(fig_inc, use_container_width=True)
+        with cbar2:
+            fig_inc = go.Figure(
+                data=[
+                    go.Bar(
+                        x=inc_segments,
+                        y=inc_vals,
+                        marker_color=[SEG_COLORS.get(s, "#9aa4b2") for s in inc_segments],
+                        showlegend=False,
+                        text=[f"{v*100:.1f}%" for v in inc_vals],
+                        textposition="outside",
+                    )
+                ]
+            )
+            fig_inc.update_layout(
+                template="plotly_dark",
+                title="增量 GMV 占比（按象限）",
+                yaxis_tickformat=".0%",
+                margin=dict(l=10, r=10, t=50, b=10),
+                height=340,
+            )
+            st.plotly_chart(fig_inc, use_container_width=True)
 
         st.markdown("---")
         st.markdown("## 交互式“沙盘反馈”（规则化占位，可接入你的 Multi-Agent）")
@@ -400,7 +555,10 @@ with tab_budget:
                 if use_deepseek:
                     api_key = _deepseek_api_key()
                     if not api_key:
-                        st.info("未检测到 `DEEPSEEK_API_KEY`（或 Streamlit secrets），已自动使用规则化反馈。")
+                        st.info(
+                            "未检测到可用密钥：请在 **本页顶部** 或侧栏填写 **DeepSeek API Key**，或设置环境变量 "
+                            "`DEEPSEEK_API_KEY` / Cloud Secrets。已自动使用规则化反馈。"
+                        )
                         st.markdown(fallback)
                         st.caption(f"示例候选：{ids}")
                         continue
@@ -491,87 +649,6 @@ with tab_budget:
                 else:
                     st.markdown(fallback)
                     st.caption(f"示例候选：{ids}")
-
-def _show_report_image(filename: str, caption: str) -> None:
-    p = ASSETS_DIR / filename
-    if p.is_file():
-        st.image(str(p), caption=caption, use_column_width=True)
-    else:
-        st.caption(
-            f"未找到配图 `{filename}`：请将文件放入仓库 `assets/` 目录并提交后重新部署（本机可把图拷到项目根目录下的 `assets/`）。"
-        )
-
-
-with tab_report:
-    st.markdown("## 报告视图（与论文对齐）")
-
-    st.markdown("### 1. 偏差校准与 ATT 结果")
-    _show_report_image(
-        "image-d1c4e177-c2d6-4b25-a0e3-c8faa5f9cca5.png",
-        "Average Treatment Effect on the Treated (ATT)：在 PSM 匹配后，补贴显著提升平均 GMV。",
-    )
-
-    st.markdown("### 2. 历史补贴分布与安全边界")
-    _show_report_image(
-        "image-7e530811-3e0b-4282-a875-9039e5c9532c.png",
-        "历史人均补贴分布呈长尾，P95≈7.63 RMB 作为业务安全上限。",
-    )
-
-    st.markdown("### 3. PAE 机制拆解（全局与异质性）")
-    c1, c2 = st.columns(2)
-    with c1:
-        _show_report_image(
-            "image-ad5f2e20-690c-475d-bb6b-000e5d6d81d7.png",
-            "Top 驱动因子：A_pay_level 与 transacted_bu_count 等是 PAE 核心决定变量。",
-        )
-    with c2:
-        _show_report_image(
-            "image-41f2d27b-9266-427f-80ba-315852133f19.png",
-            "SHAP 全局影响：高 A_pay_level 人群在 PAE 上呈明显正向偏移。",
-        )
-
-    st.markdown("### 4. A_pay_level × transacted_bu_count 的调节效应")
-    _show_report_image(
-        "image-d1f745ae-2845-4f5f-bdb9-5098f2c10ab0.png",
-        "跨业务覆盖越高时，高消费等级人群价格心智侵蚀被显著稀释。",
-    )
-
-    st.markdown("### 5. ITE 分布与负增量识别")
-    _show_report_image(
-        "image-0dea67ed-42d4-42bc-b1e5-c768f2bfa058.png",
-        "个体增量效应（ITE）分布：左侧暴露出需强制拦截的负 ROI 区间。",
-    )
-
-    st.markdown("### 6. ITE × PAE 决策矩阵")
-    _show_report_image(
-        "image-f9b8a9ce-9bf6-41b0-87fb-b7a1bf354111.png",
-        "Final Subsidy Decision Matrix：与你交互象限分群逻辑一致。",
-    )
-
-    st.markdown("### 7. 历史补贴长尾与极值截断（P95 / P99）")
-    _show_report_image(
-        "image-67b2238e-9a57-4c3f-a0a2-f579fb42450f.png",
-        "补贴极值长尾，为 P99 截断和黑产防御提供依据。",
-    )
-
-    st.markdown("### 8. 分段预算重组（受限背包）")
-    _show_report_image(
-        "image-1a766591-e768-4b76-bf92-0fab1bb2c367.png",
-        "Counterfactual Budget Reallocation：Gold 获得 +20% 资本注入，Sinking 被切断。",
-    )
-
-    st.markdown("### 9. Qini 曲线：全局最优分配增益")
-    _show_report_image(
-        "image-aac6bfb5-2106-4707-b9bc-9b1a962abfef.png",
-        "Qini 曲线显示模型增益：在前约 28% 高 ITE 用户时达到峰值。",
-    )
-
-    st.markdown("### 10. 表型聚类与多智能体沙盘")
-    _show_report_image(
-        "image-e3d579c1-0c21-4e77-842b-c71d14fea3b5.png",
-        "PCA/聚类得到的行为表型，可接入后续 Multi-Agent 仿真日志。",
-    )
-
 
 st.markdown("---")
 st.markdown("## 最小替换清单")

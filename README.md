@@ -35,8 +35,7 @@ source .venv/bin/activate
    ```toml
    DEEPSEEK_API_KEY = "sk-..."
    ```
-   应用会从环境变量读取该变量（与本地 `export DEEPSEEK_API_KEY=...` 等价）。**切勿把密钥写入代码或提交到 Git。**
-6. **报告配图**：`报告视图` 页的图片从仓库内 `assets/` 目录读取；若某张缺失，页面会显示占位说明。将对应 `image-*.png` 放入 `assets/` 并推送后即可在云端显示。
+   应用会按顺序读取：`DEEPSEEK_API_KEY` 环境变量、侧栏临时粘贴、以及 Cloud 注入的 `st.secrets`。**切勿把密钥写入代码或提交到 Git。**
 
 ## 数据格式（推荐）
 
