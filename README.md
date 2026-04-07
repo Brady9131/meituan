@@ -23,7 +23,20 @@ source .venv/bin/activate
 ```
 
 ## 关于“GitHub Pages 为什么不是我们那个交互网站”
-你截图的 `github.io/...` 页面通常只是 GitHub Pages 渲染的 `README` 静态内容，**不能直接运行 Streamlit 交互 UI**。真正的网页交互仍需要你在本机运行 `./run_dashboard.sh ...`，然后打开终端里给出的 `http://127.0.0.1:PORT`。
+你截图的 `github.io/...` 页面通常只是 GitHub Pages 渲染的 `README` 静态内容，**不能直接运行 Streamlit 交互 UI**。真正的网页交互仍需要你在本机运行 `./run_dashboard.sh ...`，然后打开终端里给出的 `http://127.0.0.1:PORT`，或使用下面的云端部署。
+
+## 部署到 Streamlit Community Cloud（推荐，可分享链接）
+
+1. 把本仓库推送到 GitHub（需包含根目录的 `requirements.txt` 与 `app_pyless.py`）。
+2. 打开 [Streamlit Community Cloud](https://streamlit.io/cloud)，用 GitHub 账号登录，**New app** → 选择仓库与分支。
+3. **Main file path** 填：`app_pyless.py`（不要填 `app.py`）。
+4. 部署后你会得到一个 `*.streamlit.app` 公网链接；侧栏上传 CSV 与本地行为一致。
+5. （可选）在 Cloud 应用设置里 **Secrets** 添加 DeepSeek 密钥，例如：
+   ```toml
+   DEEPSEEK_API_KEY = "sk-..."
+   ```
+   应用会从环境变量读取该变量（与本地 `export DEEPSEEK_API_KEY=...` 等价）。**切勿把密钥写入代码或提交到 Git。**
+6. **报告配图**：`报告视图` 页的图片从仓库内 `assets/` 目录读取；若某张缺失，页面会显示占位说明。将对应 `image-*.png` 放入 `assets/` 并推送后即可在云端显示。
 
 ## 数据格式（推荐）
 
