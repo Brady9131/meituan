@@ -68,6 +68,26 @@ AGENT_FEEDBACK = {
     "Sinking": "发券反而更亏；拦截并停用。",
 }
 
+# (展示名, 默认 Base URL, 常用模型 ID)；「自定义」由用户填写 Base 与模型
+LLM_PROVIDER_PRESETS: list[tuple[str, str, list[str]]] = [
+    ("DeepSeek", "https://api.deepseek.com", ["deepseek-chat", "deepseek-reasoner"]),
+    ("OpenAI", "https://api.openai.com", ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]),
+    ("通义千问（兼容 OpenAI）", "https://dashscope.aliyuncs.com/compatible-mode/v1", ["qwen-turbo", "qwen-plus", "qwen-max"]),
+    ("智谱 GLM", "https://open.bigmodel.cn/api/paas/v4", ["glm-4-flash", "glm-4", "glm-4-plus"]),
+    ("Moonshot", "https://api.moonshot.cn/v1", ["moonshot-v1-8k", "moonshot-v1-32k"]),
+    ("自定义", "", []),
+]
+
+
+def _openai_compat_chat_completions_url(base_url: str) -> str:
+    """不同厂商 OpenAI 兼容接口路径略有差异。"""
+    b = base_url.strip().rstrip("/")
+    if not b:
+        return ""
+    if b.endswith("/v1") or "/paas/v4" in b or b.endswith("/v4"):
+        return b + "/chat/completions"
+    return b + "/v1/chat/completions"
+
 
 def _num_fmt(x: float) -> str:
     x = float(x)
@@ -192,24 +212,39 @@ addict_accept_cost_share = st.sidebar.slider(
     step=0.05,
 )
 
-# --- DeepSeek Multi-Agent（可选） ---
+# --- LLM 沙盘（OpenAI 兼容 /chat/completions） ---
 st.sidebar.divider()
-st.sidebar.subheader("沙盘反馈生成（DeepSeek，可选）")
-st.sidebar.caption(
-    "密钥：Cloud **Secrets** 里的 `DEEPSEEK_API_KEY` · 或在本页**第一个框**粘贴（仅本会话）。"
-)
-# 放在本块最上方，避免侧栏过长时要向下滚才看到；不用 password 类型，避免少数环境/主题下输入框不可见
-st.sidebar.text_input(
-    "DeepSeek API Key（可选，仅本会话）",
-    placeholder="sk-… 粘贴后按回车或点空白处生效",
-    help="不会写入 Git；公网部署更推荐在 Streamlit Cloud → App settings → Secrets 配置 DEEPSEEK_API_KEY。",
-    key="deepseek_api_key_sidebar",
-)
-use_deepseek = st.sidebar.toggle("启用 DeepSeek 生成反馈", value=False)
-deepseek_model = st.sidebar.text_input("模型名", value="deepseek-chat")
-deepseek_base_url = st.sidebar.text_input("API Base URL", value="https://api.deepseek.com")
+st.sidebar.subheader("沙盘反馈（LLM）")
+st.sidebar.text_input("API Key", placeholder="与所选服务商一致", key="deepseek_api_key_sidebar")
 
-st.sidebar.subheader("DeepSeek 沙盘金额口径")
+_provider_labels = [p[0] for p in LLM_PROVIDER_PRESETS]
+_provider_map = {p[0]: (p[1], p[2]) for p in LLM_PROVIDER_PRESETS}
+llm_provider = st.sidebar.selectbox("API 服务商", _provider_labels, key="llm_provider_choice")
+_base_def, _model_opts = _provider_map[llm_provider]
+
+if llm_provider == "自定义":
+    deepseek_base_url = st.sidebar.text_input(
+        "API Base URL",
+        placeholder="https://api.example.com 或含 /v1 的兼容地址",
+        key="llm_base_custom",
+    )
+    deepseek_model = st.sidebar.text_input("模型 ID", placeholder="与服务商文档一致", key="llm_model_custom_only")
+else:
+    deepseek_base_url = st.sidebar.text_input(
+        "API Base URL",
+        value=_base_def,
+        key=f"llm_base_{llm_provider}",
+    )
+    _model_choices = _model_opts + ["其他（手动输入）"]
+    _model_pick = st.sidebar.selectbox("模型", _model_choices, key=f"llm_model_pick_{llm_provider}")
+    if _model_pick == "其他（手动输入）":
+        deepseek_model = st.sidebar.text_input("自定义模型 ID", key=f"llm_model_typed_{llm_provider}")
+    else:
+        deepseek_model = _model_pick
+
+use_deepseek = st.sidebar.toggle("启用 LLM 生成反馈", value=False)
+
+st.sidebar.subheader("沙盘金额口径")
 deepseek_amount_mode = st.sidebar.radio(
     "补贴/优惠券金额用于沙盘的来源",
     ["使用优化估算", "手动指定固定金额"],
@@ -230,20 +265,22 @@ def _likely_streamlit_community_cloud() -> bool:
 
 
 def _deepseek_api_key() -> str:
-    env = str(os.environ.get("DEEPSEEK_API_KEY", "") or "").strip()
-    if env:
-        return env
-    # 本页顶栏输入优先（云端侧栏有时未滚动或未部署到最新版）
+    for env_name in ("DEEPSEEK_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY"):
+        v = str(os.environ.get(env_name, "") or "").strip()
+        if v:
+            return v
     main = str(st.session_state.get("deepseek_api_key_main") or "").strip()
     if main:
         return main
     side = str(st.session_state.get("deepseek_api_key_sidebar") or "").strip()
     if side:
         return side
-    # 仅当确实存在 secrets 配置时才读 st.secrets；否则 Streamlit 会在页面打出红色 “No secrets files found”
     if _secrets_toml_exists() or _likely_streamlit_community_cloud():
         try:
-            return str(st.secrets.get("DEEPSEEK_API_KEY", "") or "").strip()
+            for k in ("DEEPSEEK_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY"):
+                s = str(st.secrets.get(k, "") or "").strip()
+                if s:
+                    return s
         except Exception:
             return ""
     return ""
@@ -254,7 +291,9 @@ def _deepseek_chat(*, api_key: str, model: str, base_url: str, content: str) -> 
     OpenAI-compatible chat completion call.
     Return plain text (assistant content).
     """
-    url = base_url.rstrip("/") + "/v1/chat/completions"
+    url = _openai_compat_chat_completions_url(base_url)
+    if not url:
+        raise ValueError("请先填写 API Base URL")
     headers = {"Authorization": f"Bearer {api_key}"}
     payload = {
         "model": model,
@@ -301,7 +340,7 @@ tab_interactive, tab_budget = st.tabs(["交互实验", "受限预算优化结果
 with tab_interactive:
     if use_deepseek:
         st.caption(
-            "DeepSeek 两段式沙盘在 **「受限预算优化结果」** 标签页：请先点击 **「执行预算优化」**，再滚动到沙盘段落。"
+            "LLM 两段式沙盘在 **「受限预算优化结果」**：请先 **执行预算优化**，再查看沙盘段落。"
         )
     st.markdown("## ITE/PAE 象限散点（策略可视化）")
     st.plotly_chart(_scatter_fig(metrics, segments), use_container_width=True)
@@ -347,11 +386,7 @@ with tab_budget:
         "Organic/Sinking 默认不投放。下方可查看 **随预算缩减变化的 ROI / 增量 GMV 曲线**。"
     )
 
-    st.text_input(
-        "DeepSeek API Key（本页填写；与侧栏密钥框二选一，仅本会话）",
-        placeholder="sk-… 未填则用环境变量或 Cloud Secrets",
-        key="deepseek_api_key_main",
-    )
+    st.text_input("API Key（与侧栏二选一）", placeholder="可选", key="deepseek_api_key_main")
 
     if "opt_result" not in st.session_state:
         st.session_state["opt_result"] = None
@@ -555,10 +590,7 @@ with tab_budget:
                 if use_deepseek:
                     api_key = _deepseek_api_key()
                     if not api_key:
-                        st.info(
-                            "未检测到可用密钥：请在 **本页顶部** 或侧栏填写 **DeepSeek API Key**，或设置环境变量 "
-                            "`DEEPSEEK_API_KEY` / Cloud Secrets。已自动使用规则化反馈。"
-                        )
+                        st.info("未检测到 API Key（侧栏或本页填写，或环境变量 `DEEPSEEK_API_KEY` / `LLM_API_KEY` / `OPENAI_API_KEY`）。已使用规则化反馈。")
                         st.markdown(fallback)
                         st.caption(f"示例候选：{ids}")
                         continue
@@ -632,18 +664,18 @@ with tab_budget:
                         ]
                     )
 
-                    with st.spinner("调用 DeepSeek 生成“两段式沙盘反馈”..."):
+                    with st.spinner("调用 LLM 生成两段式沙盘反馈…"):
                         try:
                             text = _deepseek_chat(
                                 api_key=api_key,
-                                model=deepseek_model.strip(),
-                                base_url=deepseek_base_url.strip(),
+                                model=str(deepseek_model).strip(),
+                                base_url=str(deepseek_base_url).strip(),
                                 content=prompt,
                             )
                             st.markdown(text)
                             st.caption(f"示例候选：{ids}")
                         except Exception as e:
-                            st.warning(f"DeepSeek 调用失败：{e}（已回退规则化反馈）")
+                            st.warning(f"LLM 调用失败：{e}（已回退规则化反馈）")
                             st.markdown(fallback)
                             st.caption(f"示例候选：{ids}")
                 else:
