@@ -212,46 +212,6 @@ addict_accept_cost_share = st.sidebar.slider(
     step=0.05,
 )
 
-# --- LLM 沙盘（OpenAI 兼容 /chat/completions） ---
-st.sidebar.divider()
-st.sidebar.subheader("沙盘反馈（LLM）")
-st.sidebar.text_input("API Key", placeholder="与所选服务商一致", key="deepseek_api_key_sidebar")
-
-_provider_labels = [p[0] for p in LLM_PROVIDER_PRESETS]
-_provider_map = {p[0]: (p[1], p[2]) for p in LLM_PROVIDER_PRESETS}
-llm_provider = st.sidebar.selectbox("API 服务商", _provider_labels, key="llm_provider_choice")
-_base_def, _model_opts = _provider_map[llm_provider]
-
-if llm_provider == "自定义":
-    deepseek_base_url = st.sidebar.text_input(
-        "API Base URL",
-        placeholder="https://api.example.com 或含 /v1 的兼容地址",
-        key="llm_base_custom",
-    )
-    deepseek_model = st.sidebar.text_input("模型 ID", placeholder="与服务商文档一致", key="llm_model_custom_only")
-else:
-    deepseek_base_url = st.sidebar.text_input(
-        "API Base URL",
-        value=_base_def,
-        key=f"llm_base_{llm_provider}",
-    )
-    _model_choices = _model_opts + ["其他（手动输入）"]
-    _model_pick = st.sidebar.selectbox("模型", _model_choices, key=f"llm_model_pick_{llm_provider}")
-    if _model_pick == "其他（手动输入）":
-        deepseek_model = st.sidebar.text_input("自定义模型 ID", key=f"llm_model_typed_{llm_provider}")
-    else:
-        deepseek_model = _model_pick
-
-use_deepseek = st.sidebar.toggle("启用 LLM 生成反馈", value=False)
-
-st.sidebar.subheader("沙盘金额口径")
-deepseek_amount_mode = st.sidebar.radio(
-    "补贴/优惠券金额用于沙盘的来源",
-    ["使用优化估算", "手动指定固定金额"],
-    index=0,
-)
-deepseek_fixed_amount = st.sidebar.number_input("手动固定补贴金额（RMB）", value=5.0, step=0.5, format="%.1f")
-
 
 def _secrets_toml_exists() -> bool:
     here = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
@@ -335,13 +295,9 @@ for s in segments:
 
 pae_high_rate = sum(1 for s in segments if s in ("Addict", "Sinking")) / max(1, len(segments))
 
-tab_interactive, tab_budget = st.tabs(["交互实验", "受限预算优化结果"])
+tab_interactive, tab_budget, tab_llm = st.tabs(["交互实验", "受限预算优化结果", "沙盘反馈（LLM）"])
 
 with tab_interactive:
-    if use_deepseek:
-        st.caption(
-            "LLM 两段式沙盘在 **「受限预算优化结果」**：请先 **执行预算优化**，再查看沙盘段落。"
-        )
     st.markdown("## ITE/PAE 象限散点（策略可视化）")
     st.plotly_chart(_scatter_fig(metrics, segments), use_container_width=True)
 
@@ -385,8 +341,6 @@ with tab_budget:
         "说明：在「总预算缩减」约束下，按 **Gold 优先 → Addict 追加** 做分数背包式投放；"
         "Organic/Sinking 默认不投放。下方可查看 **随预算缩减变化的 ROI / 增量 GMV 曲线**。"
     )
-
-    st.text_input("API Key（与侧栏二选一）", placeholder="可选", key="deepseek_api_key_main")
 
     if "opt_result" not in st.session_state:
         st.session_state["opt_result"] = None
@@ -570,33 +524,79 @@ with tab_budget:
             )
             st.plotly_chart(fig_inc, use_container_width=True)
 
-        st.markdown("---")
-        st.markdown("## 交互式“沙盘反馈”（规则化占位，可接入你的 Multi-Agent）")
-        treated_idxs = [i for i, f in enumerate(result.treated_frac) if f > 1e-9]
+with tab_llm:
+    st.markdown("## 沙盘反馈（LLM）")
+    st.caption("与「交互实验」「受限预算优化结果」并列；需先在 **受限预算优化结果** 中执行一次预算优化。")
+
+    st.text_input("API Key", placeholder="与所选服务商一致", key="deepseek_api_key_sidebar")
+
+    _provider_labels = [p[0] for p in LLM_PROVIDER_PRESETS]
+    _provider_map = {p[0]: (p[1], p[2]) for p in LLM_PROVIDER_PRESETS}
+    llm_provider = st.selectbox("API 服务商", _provider_labels, key="llm_provider_choice")
+    _base_def, _model_opts = _provider_map[llm_provider]
+
+    if llm_provider == "自定义":
+        deepseek_base_url = st.text_input(
+            "API Base URL",
+            placeholder="https://api.example.com 或含 /v1 的兼容地址",
+            key="llm_base_custom",
+        )
+        deepseek_model = st.text_input("模型 ID", placeholder="与服务商文档一致", key="llm_model_custom_only")
+    else:
+        deepseek_base_url = st.text_input(
+            "API Base URL",
+            value=_base_def,
+            key=f"llm_base_{llm_provider}",
+        )
+        _model_choices = _model_opts + ["其他（手动输入）"]
+        _model_pick = st.selectbox("模型", _model_choices, key=f"llm_model_pick_{llm_provider}")
+        if _model_pick == "其他（手动输入）":
+            deepseek_model = st.text_input("自定义模型 ID", key=f"llm_model_typed_{llm_provider}")
+        else:
+            deepseek_model = _model_pick
+
+    use_deepseek = st.toggle("启用 LLM 生成反馈", value=False)
+
+    st.subheader("沙盘金额口径")
+    deepseek_amount_mode = st.radio(
+        "补贴/优惠券金额用于沙盘的来源",
+        ["使用优化估算", "手动指定固定金额"],
+        index=0,
+        horizontal=True,
+    )
+    deepseek_fixed_amount = st.number_input("手动固定补贴金额（RMB）", value=5.0, step=0.5, format="%.1f")
+
+    st.markdown("---")
+    st.markdown("### 两段式沙盘输出（按象限）")
+
+    result_llm: OptimizationResult | None = st.session_state.get("opt_result")
+    if result_llm is None:
+        st.info("请先到 **「受限预算优化结果」** 标签页，点击 **「执行预算优化」** 后再回到本页查看沙盘。")
+    else:
+        treated_idxs = [i for i, f in enumerate(result_llm.treated_frac) if f > 1e-9]
         if not treated_idxs:
-            st.warning("当前参数下未选择任何可投放单元。请降低预算约束或调整阈值。")
+            st.warning("当前参数下未选择任何可投放单元。请在「受限预算优化结果」中放宽预算或调整阈值。")
         else:
             for seg in SEGMENTS:
                 seg_idxs = [i for i in treated_idxs if segments[i] == seg]
                 if not seg_idxs:
                     continue
                 top3 = sorted(seg_idxs, key=lambda i: metrics.ite[i], reverse=True)[:3]
-                st.markdown(f"### {seg}（处理单元：{len(seg_idxs):,}）")
+                st.markdown(f"#### {seg}（处理单元：{len(seg_idxs):,}）")
                 ids = [int(metrics.user_id[i]) for i in top3]
 
-                # 规则化兜底（永远可用）
                 fallback = AGENT_FEEDBACK[seg]
 
                 if use_deepseek:
                     api_key = _deepseek_api_key()
                     if not api_key:
-                        st.info("未检测到 API Key（侧栏或本页填写，或环境变量 `DEEPSEEK_API_KEY` / `LLM_API_KEY` / `OPENAI_API_KEY`）。已使用规则化反馈。")
+                        st.info(
+                            "未检测到 API Key（上方填写或环境变量 `DEEPSEEK_API_KEY` / `LLM_API_KEY` / `OPENAI_API_KEY`）。已使用规则化反馈。"
+                        )
                         st.markdown(fallback)
                         st.caption(f"示例候选：{ids}")
                         continue
 
-                    # 给模型一个“可解释、可落地”的输入模板（两段式：Strategy Agent + User Agent）
-                    # cost 在这里按你的要求映射为 avg_reduce_amount；optimal_subsidy 用 cost * treated_frac 估算。
                     persona_map = {
                         "Gold": "你是 Gold 高潜摇摆客，追求生活品质；这次拿到更合适的优惠后会立刻下单。",
                         "Addict": "你是 Addict 中度依赖老客，习惯用美团；即使优惠略有变化也会接受并完成下单。",
@@ -613,7 +613,7 @@ with tab_budget:
                     treated_summary_blocks: list[str] = []
                     for i in top3:
                         avg_reduce_amount = float(metrics.cost[i])
-                        f = float(result.treated_frac[i])
+                        f = float(result_llm.treated_frac[i])
                         optimal_subsidy = avg_reduce_amount * f
                         send_amount = optimal_subsidy
                         if deepseek_amount_mode == "手动指定固定金额":
